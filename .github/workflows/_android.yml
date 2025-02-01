@@ -12,7 +12,7 @@ jobs:
       id-token: write
       contents: read
     with:
-      runner: linux.2xlarge
+      runner: ubuntu-latest
       docker-image: executorch-ubuntu-22.04-clang12-android
       submodules: 'true'
       ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
