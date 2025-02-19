@@ -182,6 +182,14 @@ option(EXECUTORCH_BUILD_EXTENSION_DATA_LOADER "Build the Data Loader extension"
        OFF
 )
 
+option(EXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR "Build the Flat Tensor extension"
+       OFF
+)
+
+option(EXECUTORCH_BUILD_EXTENSION_LLM "Build the LLM extension"
+       OFF
+)
+
 option(EXECUTORCH_BUILD_EXTENSION_MODULE "Build the Module extension" OFF)
 
 option(EXECUTORCH_BUILD_EXTENSION_RUNNER_UTIL "Build the Runner Util extension"
@@ -239,6 +247,16 @@ cmake_dependent_option(
   EXECUTORCH_BUILD_CPUINFO "Build cpuinfo library." ON
   "NOT EXECUTORCH_BUILD_ARM_BAREMETAL" OFF
 )
+
+if(EXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR)
+  set(EXECUTORCH_BUILD_EXTENSION_DATA_LOADER ON)
+endif()
+
+if(EXECUTORCH_BUILD_EXTENSION_TRAINING)
+  set(EXECUTORCH_BUILD_EXTENSION_TENSOR ON)
+  set(EXECUTORCH_BUILD_EXTENSION_DATA_LOADER ON)
+  set(EXECUTORCH_BUILD_EXTENSION_MODULE ON)
+endif()
 
 if(EXECUTORCH_BUILD_KERNELS_CUSTOM_AOT)
   set(EXECUTORCH_BUILD_EXTENSION_TENSOR ON)
@@ -334,6 +352,7 @@ if(EXECUTORCH_BUILD_PTHREADPOOL)
 endif()
 
 if(EXECUTORCH_BUILD_TESTS)
+  set(EXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR ON)
   include(CTest)
 endif()
 
@@ -359,7 +378,7 @@ if(NOT "${_repo_dir_name}" STREQUAL "executorch")
       "fix for this restriction."
   )
 endif()
-set(_common_include_directories ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set(_common_include_directories ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/runtime/core/portable_type/c10)
 
 #
 # The `_<target>_srcs` lists are defined by including ${EXECUTORCH_SRCS_FILE}.
@@ -542,6 +561,7 @@ endif()
 target_include_directories(
   executorch_core PUBLIC ${_common_include_directories}
 )
+target_compile_definitions(executorch_core PUBLIC C10_USING_CUSTOM_GENERATED_MACROS)
 target_compile_options(executorch_core PUBLIC ${_common_compile_options})
 if(MAX_KERNEL_NUM)
   target_compile_definitions(
@@ -562,6 +582,7 @@ if(EXECUTORCH_BUILD_PYBIND AND APPLE)
   target_include_directories(
     executorch_core_shared PUBLIC ${_common_include_directories}
   )
+  target_compile_definitions(executorch_core_shared PUBLIC C10_USING_CUSTOM_GENERATED_MACROS)
   target_compile_options(
     executorch_core_shared PUBLIC ${_common_compile_options}
   )
@@ -580,8 +601,9 @@ endif()
 # any backends.
 #
 add_library(executorch ${_executorch__srcs})
-target_link_libraries(executorch PRIVATE executorch_core)
+target_link_libraries(executorch PUBLIC executorch_core)
 target_include_directories(executorch PUBLIC ${_common_include_directories})
+target_compile_definitions(executorch PUBLIC C10_USING_CUSTOM_GENERATED_MACROS)
 target_compile_options(executorch PUBLIC ${_common_compile_options})
 target_link_options_shared_lib(executorch)
 
@@ -597,6 +619,8 @@ if(BUILD_EXECUTORCH_PORTABLE_OPS)
 endif()
 
 if(EXECUTORCH_BUILD_KERNELS_OPTIMIZED)
+  # find pytorch lib here to make it available to all sub-directories
+  find_package_torch_headers()
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/kernels/optimized)
 endif()
 
@@ -615,6 +639,12 @@ endif()
 
 # Install `executorch` library as well as `executorch-config.cmake` under
 # ${CMAKE_INSTALL_PREFIX}/
+install(DIRECTORY runtime/core/  DESTINATION include/executorch/runtime/core FILES_MATCHING PATTERN "*.h")
+install(DIRECTORY runtime/kernel/  DESTINATION include/executorch/runtime/kernel FILES_MATCHING PATTERN "*.h")
+install(DIRECTORY runtime/platform/  DESTINATION include/executorch/runtime/platform FILES_MATCHING PATTERN "*.h")
+install(DIRECTORY extension/kernel_util/  DESTINATION include/executorch/extension/kernel_util FILES_MATCHING PATTERN "*.h")
+install(DIRECTORY extension/tensor/  DESTINATION include/executorch/extension/tensor FILES_MATCHING PATTERN "*.h")
+install(DIRECTORY extension/threadpool/  DESTINATION include/executorch/extension/threadpool FILES_MATCHING PATTERN "*.h")
 install(
   TARGETS executorch executorch_core
   DESTINATION lib
@@ -687,6 +717,15 @@ if(EXECUTORCH_BUILD_EXTENSION_DATA_LOADER)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/extension/data_loader)
 endif()
 
+if(EXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/extension/flat_tensor)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/extension/flat_tensor/serialize)
+endif()
+
+if(EXECUTORCH_BUILD_EXTENSION_LLM)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/extension/llm/tokenizer)
+endif()
+
 if(EXECUTORCH_BUILD_EXTENSION_MODULE)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/extension/module)
 endif()
@@ -722,7 +761,7 @@ if(EXECUTORCH_BUILD_PYBIND)
   endif()
 
   # find pytorch lib, to allow pybind to take at::Tensor as input/output
-  find_package(Torch CONFIG REQUIRED)
+  find_package_torch()
   find_library(
     TORCH_PYTHON_LIBRARY torch_python PATHS "${TORCH_INSTALL_PREFIX}/lib"
   )
@@ -773,6 +812,8 @@ if(EXECUTORCH_BUILD_PYBIND)
   target_include_directories(
     util PUBLIC ${_common_include_directories} ${TORCH_INCLUDE_DIRS}
   )
+  target_compile_definitions(util PUBLIC C10_USING_CUSTOM_GENERATED_MACROS)
+
   target_compile_options(util PUBLIC ${_pybind_compile_options})
   target_link_libraries(util PRIVATE torch c10 executorch extension_tensor)
 
@@ -791,6 +832,35 @@ if(EXECUTORCH_BUILD_PYBIND)
   install(TARGETS portable_lib
           LIBRARY DESTINATION executorch/extension/pybindings
   )
+
+  if(EXECUTORCH_BUILD_EXTENSION_TRAINING)
+
+    set(_pybind_training_dep_libs
+        ${TORCH_PYTHON_LIBRARY}
+        etdump
+        executorch
+        util
+        torch
+        extension_training
+    )
+
+    if(EXECUTORCH_BUILD_XNNPACK)
+      # need to explicitly specify XNNPACK and microkernels-prod
+      # here otherwise uses XNNPACK and microkernel-prod symbols from libtorch_cpu
+      list(APPEND _pybind_training_dep_libs xnnpack_backend XNNPACK microkernels-prod)
+    endif()
+
+    # pybind training
+    pybind11_add_module(_training_lib SHARED extension/training/pybindings/_training_lib.cpp)
+
+    target_include_directories(_training_lib PRIVATE ${TORCH_INCLUDE_DIRS})
+    target_compile_options(_training_lib PUBLIC ${_pybind_compile_options})
+    target_link_libraries(_training_lib PRIVATE ${_pybind_training_dep_libs})
+
+    install(TARGETS _training_lib
+            LIBRARY DESTINATION executorch/extension/training/pybindings
+    )
+  endif()
 endif()
 
 if(EXECUTORCH_BUILD_KERNELS_CUSTOM)

@@ -18,6 +18,7 @@
 #include <executorch/runtime/core/exec_aten/util/scalar_type_util.h>
 #include <executorch/runtime/platform/log.h>
 #include <ctime>
+#include <fstream>
 #include <sstream>
 
 using executorch::aten::Tensor;
@@ -125,6 +126,8 @@ Error Runner::load() {
   int64_t head_dim = method_meta.output_tensor_meta(1)->sizes()[1]; // k_cache
   int64_t num_heads = (method_meta.num_outputs() - 1) / (num_layers * 2);
   vocab_size_ = method_meta.output_tensor_meta(0)->sizes()[2]; // logit_tensor
+  use_int64_token_ = method_meta.input_tensor_meta(0)->scalar_type() ==
+      executorch::aten::ScalarType::Long;
   ET_CHECK_MSG(num_layers != -1, "Could not retrieve num layers");
 
   if (kv_updator_ == "SmartMask") {
@@ -138,7 +141,8 @@ Error Runner::load() {
         num_heads,
         eval_mode_,
         prefill_forward_name_,
-        kv_forward_name_);
+        kv_forward_name_,
+        use_int64_token_);
   } else if (kv_updator_ == "ShiftPointer") {
     io_mgr_ = std::make_unique<ShiftPointerIoMgr>(
         modules_,
@@ -150,7 +154,8 @@ Error Runner::load() {
         num_heads,
         eval_mode_,
         prefill_forward_name_,
-        kv_forward_name_);
+        kv_forward_name_,
+        use_int64_token_);
   } else {
     ET_LOG(Error, "Using an unknown updator %s", kv_updator_.c_str());
   }
@@ -514,6 +519,19 @@ void printReport(const Runner::Stats& stats) {
       stats.num_generated_tokens,
       (double)stats.aggregate_sampling_time_ms /
           stats.SCALING_FACTOR_UNITS_PER_SECOND);
+
+  // For now, we just print the total inference time for CI, can save more info
+  // in future if needed.
+  std::ofstream outfile("outputs/inference_speed.txt");
+  if (outfile.is_open()) {
+    double num_tok = (stats.num_generated_tokens) /
+        (double)(stats.inference_end_ms - stats.inference_start_ms) *
+        stats.SCALING_FACTOR_UNITS_PER_SECOND;
+    outfile << num_tok;
+    outfile.close();
+  } else {
+    ET_CHECK_MSG(false, "Error saving the inference speed file");
+  }
 }
 
 std::string statsToJsonString(const Runner::Stats& stats) {
